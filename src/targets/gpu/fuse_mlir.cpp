@@ -301,15 +301,13 @@ struct find_mlir_fused_ops
     }
 };
 
-struct find_mlir_standalone_convolution_op
+struct find_mlir_standalone_op
 {
-    auto matcher() const { return match::name("convolution"); }
-
     void apply(module_pass_manager& mpm, const match::matcher_result& r) const
     {
-        auto conv_based_op = r.result;
+        auto standalone_op = r.result;
         // enable only for fp32/fp16/i8 types
-        if(std::any_of(conv_based_op->inputs().begin(), conv_based_op->inputs().end(), [&](auto i) {
+        if(std::any_of(standalone_op->inputs().begin(), standalone_op->inputs().end(), [&](auto i) {
                return not contains(
                    {shape::type_t::float_type, shape::type_t::half_type, shape::type_t::int8_type},
                    i->get_shape().type());
@@ -319,16 +317,25 @@ struct find_mlir_standalone_convolution_op
         static size_t counter = 0;
         module_ref mm         = mpm.create_module("mlir_" + std::to_string(counter++));
         mm->set_bypass();
-        auto [anchor_op, top_inputs] = fuse_input_ops_and_gemm_based_op(mm, conv_based_op);
+        auto [anchor_op, top_inputs] = fuse_input_ops_and_gemm_based_op(mm, standalone_op);
         mm->add_return({anchor_op});
         mpm.get_module().replace_instruction(
-            conv_based_op, mlir_op{conv_based_op->get_operator()}, top_inputs, {mm});
+            standalone_op, mlir_op{standalone_op->get_operator()}, top_inputs, {mm});
     }
+};
+
+struct find_mlir_standalone_convolution_op : find_mlir_standalone_op
+{
+    auto matcher() const { return match::name("convolution"); }
+};
+
+struct find_mlir_standalone_dot_op : find_mlir_standalone_op
+{
+    auto matcher() const { return match::name("dot"); }
 };
 
 MIGRAPHX_DECLARE_ENV_VAR(MIGRAPHX_MLIR_ENABLE_OPS);
 bool is_self_decide() { return env(MIGRAPHX_MLIR_ENABLE_OPS::value()).empty(); }
-
 bool is_requested(std::string_view option)
 {
     assert(enabled(MIGRAPHX_MLIR_ENABLE_OPS{}));
@@ -358,6 +365,8 @@ bool is_standalone_convs_enabled(const std::string& gfx_name)
     }
     return is_requested("conv");
 }
+
+bool is_standalone_dots_enabled() { return is_requested("dot"); }
 } // namespace
 
 #endif // MIGRAPHX_MLIR
@@ -374,6 +383,11 @@ void mlir_offload::apply(module_pass_manager& mpm) const
     if(is_standalone_convs_enabled(device.get_gfx_name()))
     {
         match::find_matches(mpm, find_mlir_standalone_convolution_op{});
+    }
+
+    if(is_standalone_dots_enabled())
+    {
+        match::find_matches(mpm, find_mlir_standalone_dot_op{});
     }
 #else
     (void)mpm;
